@@ -1,0 +1,143 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── LI.FI Brand tokens ────────────────────────────────────────────────────── */
+:root {
+  --bg:           #000000;
+  --lifi-blue:    #5C67FF;
+  --lifi-blue-2:  #3F49E1;
+  --lifi-pink:    #F7C2FF;
+  --lifi-hover:   #7C83EB;
+
+  --text-primary:   rgba(255,255,255,0.84);
+  --text-secondary: rgba(255,255,255,0.48);
+  --border:         rgba(255,255,255,0.10);
+  --border-subtle:  rgba(255,255,255,0.06);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-inter), "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.12);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+
+/* ── Animated ambient orbs — LI.FI pink + blue ── */
+.orb {
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(90px);
+  pointer-events: none;
+  z-index: 0;
+  animation: orb-drift 22s ease-in-out infinite alternate;
+}
+.orb-1 {
+  width: 640px;
+  height: 640px;
+  top: -220px;
+  left: -180px;
+  /* LI.FI pink */
+  background: radial-gradient(circle, rgba(247,194,255,0.09) 0%, transparent 70%);
+  animation-delay: 0s;
+}
+.orb-2 {
+  width: 520px;
+  height: 520px;
+  bottom: -160px;
+  right: -160px;
+  /* LI.FI blue */
+  background: radial-gradient(circle, rgba(92,103,255,0.11) 0%, transparent 70%);
+  animation-delay: -9s;
+}
+.orb-3 {
+  width: 420px;
+  height: 420px;
+  top: 42%;
+  left: 50%;
+  transform: translateX(-50%);
+  /* soft center glow */
+  background: radial-gradient(circle, rgba(92,103,255,0.05) 0%, transparent 70%);
+  animation-delay: -5s;
+  animation-name: orb-drift-center;
+}
+@keyframes orb-drift {
+  0%   { transform: translate(0, 0)   scale(1); }
+  50%  { transform: translate(28px, -22px) scale(1.05); }
+  100% { transform: translate(-18px, 28px) scale(0.96); }
+}
+@keyframes orb-drift-center {
+  0%   { transform: translateX(-50%) translate(0, 0) scale(1); }
+  50%  { transform: translateX(-50%) translate(18px, -28px) scale(1.08); }
+  100% { transform: translateX(-50%) translate(-18px, 18px) scale(0.92); }
+}
+
+/* ── Glass card ── */
+.glass {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+.glass-hover {
+  transition: border-color 150ms linear, background 150ms linear;
+}
+.glass-hover:hover {
+  background: rgba(255,255,255,0.05);
+  border-color: rgba(255,255,255,0.14);
+}
+
+/* ── Terminal log ── */
+.terminal {
+  background: #060608;
+  border: 1px solid var(--border-subtle);
+  font-family: "Roboto Mono", "Fira Code", "JetBrains Mono", ui-monospace, monospace;
+}
+.terminal-cursor::after {
+  content: "▋";
+  animation: blink 1.1s step-start infinite;
+  color: var(--lifi-blue);
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+/* ── Bridge arrow pulse ── */
+@keyframes arrow-bounce {
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(4px); }
+}
+.arrow-bounce {
+  animation: arrow-bounce 1.8s ease-in-out infinite;
+}
+
+/* ── Success glow ── */
+@keyframes success-glow {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); }
+  50%       { box-shadow: 0 0 24px 4px rgba(16,185,129,0.10); }
+}
+.success-glow {
+  animation: success-glow 2s ease-in-out infinite;
+}
+
+/* ── Spin ── */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.spin {
+  animation: spin 0.8s linear infinite;
+}
