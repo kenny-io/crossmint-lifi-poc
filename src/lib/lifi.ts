@@ -67,8 +67,18 @@ export async function getBestRoute(
     fromAmount: params.fromAmount,
     fromAddress: params.fromAddress,
     options: {
-      order: "FASTEST",
+      // RECOMMENDED prefers well-tested bridges (Stargate, Across, etc.)
+      // over fastest-but-fragile options like GasZip.
+      order: "RECOMMENDED",
       slippage: params.slippage ?? 0.005, // 0.5% default
+      // Deny GasZip bridge: its route requires two separate transactions
+      // (DEX swap USDC→ETH, then bridge ETH). Crossmint simulates each
+      // transaction independently, so the bridge simulation runs without
+      // the ETH received from the swap — causing an execution_reverted
+      // (selector 0xe52970aa) on any wallet that holds only USDC.
+      // RECOMMENDED routes (e.g. Relay) handle USDC→ETH in a single
+      // cross-chain transaction, which simulates and executes correctly.
+      bridges: { deny: ["gasZipBridge"] },
     },
   };
 

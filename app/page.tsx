@@ -23,6 +23,10 @@ interface WalletInfo {
   address: string;
   explorerUrls: { base: string; arbitrum: string };
 }
+interface WalletRecord {
+  userId: string | null;
+  address: string;
+}
 interface StatusEvent {
   step: number;
   status: string;
@@ -182,6 +186,7 @@ export default function Home() {
   const [walletLoading, setWalletLoading] = useState(false);
   const [walletError, setWalletError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [newWalletToast, setNewWalletToast] = useState<string | null>(null);
 
   // Balance
   const [balances, setBalances] = useState<TokenBalance[]>([]);
@@ -209,6 +214,11 @@ export default function Home() {
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
   const withdrawLogRef = useRef<HTMLDivElement>(null);
 
+  // Wallet history (all wallets ever created/loaded in this browser)
+  const [walletHistory, setWalletHistory] = useState<WalletRecord[]>([]);
+  const [historyBalances, setHistoryBalances] = useState<Record<string, TokenBalance[]>>({});
+  const [selectedWithdrawAddr, setSelectedWithdrawAddr] = useState<string | null>(null);
+
   // Derived step
   const activeStep = bridgeResult || bridgeError
     ? 4
@@ -222,11 +232,21 @@ export default function Home() {
 
   // ── Handlers ──────────────────────────────────────────────────────────────
 
+  function addToWalletHistory(record: WalletRecord) {
+    setWalletHistory((prev) => {
+      if (prev.some((w) => w.address === record.address)) return prev;
+      const updated = [...prev, record];
+      localStorage.setItem("crossmint_wallet_history", JSON.stringify(updated));
+      return updated;
+    });
+  }
+
   /**
    * Load (or create) a wallet for the given userId.
    * If no userId is provided, uses the server's default locator from .env.
+   * Returns the loaded WalletInfo on success, or null on error.
    */
-  async function initWallet(userId?: string) {
+  async function initWallet(userId?: string): Promise<WalletInfo | null> {
     setWalletLoading(true);
     setWalletError(null);
     try {
@@ -239,15 +259,18 @@ export default function Home() {
       setWalletUserId(uid);
       localStorage.setItem("crossmint_wallet", JSON.stringify(data));
       localStorage.setItem("crossmint_wallet_userId", uid ?? "");
+      addToWalletHistory({ userId: uid, address: data.address });
+      return data as WalletInfo;
     } catch (e) {
       setWalletError(e instanceof Error ? e.message : String(e));
+      return null;
     } finally {
       setWalletLoading(false);
     }
   }
 
   /** Create a brand-new wallet with a fresh timestamped user ID. */
-  function newWallet() {
+  async function newWallet() {
     const userId = `demo-user-${Date.now()}`;
     // Clear all previous session state
     setBalances([]);
@@ -259,24 +282,66 @@ export default function Home() {
     setWithdrawLog([]);
     setWithdrawResult(null);
     setWithdrawError(null);
-    initWallet(userId);
+
+    const newData = await initWallet(userId);
+    if (newData) {
+      // Show toast notification
+      setNewWalletToast(newData.address);
+      setTimeout(() => setNewWalletToast(null), 5000);
+
+      // Switch withdraw selection to new wallet
+      setSelectedWithdrawAddr(newData.address);
+
+      // Auto-fetch balances for the new wallet
+      setBalanceLoading(true);
+      try {
+        const tokens = await getOnChainBalances(newData.address);
+        setBalances(tokens);
+        setBalanceFetched(true);
+        setHistoryBalances((prev) => ({ ...prev, [newData.address]: tokens }));
+      } catch (e) {
+        setBalanceError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBalanceLoading(false);
+      }
+    }
   }
 
-  // On mount: restore cached wallet instantly, then re-verify in background
+  // On mount: restore cached wallet + history instantly, then re-verify in background
   useEffect(() => {
     const cached = localStorage.getItem("crossmint_wallet");
     const cachedUserId = localStorage.getItem("crossmint_wallet_userId") || undefined;
+    const cachedHistory = localStorage.getItem("crossmint_wallet_history");
+
     if (cached) {
       try {
         setWallet(JSON.parse(cached));
         setWalletUserId(cachedUserId ?? null);
-      } catch {
-        // malformed cache — ignore, initWallet will fix it
-      }
+      } catch { /* malformed — initWallet will fix */ }
+    }
+    if (cachedHistory) {
+      try { setWalletHistory(JSON.parse(cachedHistory)); } catch { /* ignore */ }
     }
     initWallet(cachedUserId || undefined);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Auto-fetch balances for every wallet in history whenever the list changes
+  useEffect(() => {
+    if (walletHistory.length === 0) return;
+    walletHistory.forEach(async ({ address }) => {
+      try {
+        const bals = await getOnChainBalances(address);
+        setHistoryBalances((prev) => ({ ...prev, [address]: bals }));
+      } catch { /* silent — public RPC failure shouldn't crash the UI */ }
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletHistory.map((w) => w.address).join(",")]);
+
+  // Default the selected withdraw wallet to the active wallet
+  useEffect(() => {
+    if (wallet?.address) setSelectedWithdrawAddr((prev) => prev ?? wallet.address);
+  }, [wallet?.address]);
 
   /**
    * Balances are read directly from Base chain via viem public client —
@@ -308,6 +373,7 @@ export default function Home() {
     setStatusLog([]);
     const amountUnits = String(Math.round(parseFloat(amount) * 1_000_000));
     try {
+      const bridgeLocator = walletUserId ? `userId:${walletUserId}:evm:smart` : undefined;
       const res = await fetch("/api/bridge", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -317,6 +383,7 @@ export default function Home() {
           fromToken: TOKENS.USDC_BASE,
           toToken: TOKENS.ETH_NATIVE,
           amount: amountUnits,
+          locator: bridgeLocator,
         }),
       });
       const reader = res.body?.getReader();
@@ -356,7 +423,14 @@ export default function Home() {
     }
   }
 
+  function locatorForAddress(address: string): string | undefined {
+    const record = walletHistory.find((w) => w.address === address);
+    if (!record?.userId) return undefined; // server will use .env default
+    return `userId:${record.userId}:evm:smart`;
+  }
+
   async function executeWithdraw() {
+    if (!selectedWithdrawAddr) return;
     setWithdrawing(true);
     setWithdrawResult(null);
     setWithdrawError(null);
@@ -365,7 +439,10 @@ export default function Home() {
       const res = await fetch("/api/withdraw", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ destination: withdrawDest }),
+        body: JSON.stringify({
+          destination: withdrawDest,
+          locator: locatorForAddress(selectedWithdrawAddr),
+        }),
       });
       const reader = res.body?.getReader();
       const decoder = new TextDecoder();
@@ -391,11 +468,12 @@ export default function Home() {
             }, 0);
           } else if (event === "complete") {
             setWithdrawResult(payload);
-            // Refresh balances after successful withdrawal
-            if (payload.status === "SUCCESS" && wallet) {
-              const { getOnChainBalances } = await import("@/lib/crossmint-client");
-              const updated = await getOnChainBalances(wallet.address);
-              setBalances(updated);
+            // Refresh balances for the wallet that just withdrew
+            if (payload.status === "SUCCESS" && selectedWithdrawAddr) {
+              const updated = await getOnChainBalances(selectedWithdrawAddr);
+              setHistoryBalances((prev) => ({ ...prev, [selectedWithdrawAddr]: updated }));
+              // Also update main balance panel if it's the active wallet
+              if (selectedWithdrawAddr === wallet?.address) setBalances(updated);
             }
           } else if (event === "error") {
             setWithdrawError(payload.message);
@@ -424,6 +502,17 @@ export default function Home() {
   const hasAnyBalance = nonZeroBalances.length > 0;
   const isValidDest = withdrawDest.startsWith("0x") && withdrawDest.length === 42;
 
+  const selectedBalances = selectedWithdrawAddr
+    ? (historyBalances[selectedWithdrawAddr] ?? []).filter((b) => Number(b.amount) > 0)
+    : [];
+  const selectedHasBalance = selectedBalances.length > 0;
+  const canWithdraw = !withdrawing && selectedHasBalance && isValidDest && !!selectedWithdrawAddr;
+
+  // Only show the withdraw section once at least one known wallet has funds
+  const anyWalletHasFunds = walletHistory.some(
+    (w) => (historyBalances[w.address] ?? []).some((b) => Number(b.amount) > 0)
+  );
+
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="relative min-h-screen overflow-x-hidden" style={{ background: "#000000" }}>
@@ -431,6 +520,51 @@ export default function Home() {
       <div className="orb orb-1" />
       <div className="orb orb-2" />
       <div className="orb orb-3" />
+
+      {/* New wallet toast */}
+      {newWalletToast && (
+        <div
+          className="fixed top-5 left-1/2 z-50 flex items-start gap-3 px-4 py-3.5 rounded-xl shadow-2xl"
+          style={{
+            transform: "translateX(-50%)",
+            background: "rgba(10,10,16,0.92)",
+            border: "1px solid rgba(92,103,255,0.45)",
+            backdropFilter: "blur(20px)",
+            boxShadow: "0 0 32px rgba(92,103,255,0.25)",
+            minWidth: "320px",
+            maxWidth: "480px",
+          }}
+        >
+          {/* Icon */}
+          <div
+            className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+            style={{ background: "rgba(92,103,255,0.18)", border: "1px solid rgba(92,103,255,0.35)" }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#7C83EB" strokeWidth="2.5">
+              <path d="M12 5v14M5 12h14" strokeLinecap="round" />
+            </svg>
+          </div>
+          {/* Text */}
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold mb-0.5" style={{ color: "#7C83EB" }}>
+              New wallet created
+            </p>
+            <p className="text-[11px] text-white/48 mb-1">
+              All features are now using this wallet
+            </p>
+            <code className="text-[11px] text-white/70 font-mono break-all">{newWalletToast}</code>
+          </div>
+          {/* Dismiss */}
+          <button
+            onClick={() => setNewWalletToast(null)}
+            className="flex-shrink-0 text-white/25 hover:text-white/60 transition-colors mt-0.5"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+      )}
 
       {/* Header */}
       <header className="relative z-10" style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(20px)", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
@@ -668,25 +802,123 @@ export default function Home() {
           </div>
         </div>
 
-        {/* ── Section 3: Withdraw ──────────────────────────────────────── */}
-        <div className="glass rounded-2xl p-5">
+        {/* ── Section 3: Withdraw — only shown when at least one wallet has funds ── */}
+        {anyWalletHasFunds && <div className="glass rounded-2xl p-5">
           <div className="flex items-start gap-4">
             <div
               className="w-7 h-7 rounded-full flex items-center justify-center flex-shrink-0"
               style={{
-                background: hasAnyBalance ? "rgba(16,185,129,0.15)" : "rgba(255,255,255,0.04)",
-                border: hasAnyBalance ? "1px solid rgba(16,185,129,0.35)" : "1px solid rgba(255,255,255,0.08)",
+                background: selectedHasBalance ? "rgba(16,185,129,0.15)" : "rgba(255,255,255,0.04)",
+                border: selectedHasBalance ? "1px solid rgba(16,185,129,0.35)" : "1px solid rgba(255,255,255,0.08)",
               }}
             >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={hasAnyBalance ? "#34d399" : "#475569"} strokeWidth="2.5">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={selectedHasBalance ? "#34d399" : "#475569"} strokeWidth="2.5">
                 <path d="M12 2v20M17 7l-5-5-5 5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </div>
             <div className="flex-1 min-w-0">
               <h2 className="text-sm font-semibold text-white mb-0.5">Withdraw Funds</h2>
-              <p className="text-xs text-white/40 mb-4">Send all smart wallet assets to your own address</p>
+              <p className="text-xs text-white/40 mb-4">
+                Select a wallet and send its assets to your own address
+              </p>
 
-              {/* Destination input */}
+              {/* ── Wallet selector ── */}
+              {walletHistory.length === 0 ? (
+                <p className="text-xs text-white/25 mb-3">
+                  No wallets loaded yet — initialize a wallet above first.
+                </p>
+              ) : (
+                <div className="mb-4 space-y-2">
+                  <p className="text-[10px] text-white/40 uppercase tracking-wide font-medium mb-2">
+                    Select source wallet
+                  </p>
+                  {walletHistory.map((record) => {
+                    const isSelected = selectedWithdrawAddr === record.address;
+                    const wBals = (historyBalances[record.address] ?? []).filter(
+                      (b) => Number(b.amount) > 0
+                    );
+                    const isActive = record.address === wallet?.address;
+
+                    return (
+                      <button
+                        key={record.address}
+                        onClick={() => {
+                          setSelectedWithdrawAddr(record.address);
+                          setWithdrawResult(null);
+                          setWithdrawError(null);
+                          setWithdrawLog([]);
+                        }}
+                        className="w-full text-left rounded-xl px-3.5 py-3 transition-all"
+                        style={{
+                          background: isSelected
+                            ? "rgba(92,103,255,0.08)"
+                            : "rgba(255,255,255,0.03)",
+                          border: isSelected
+                            ? "1px solid rgba(92,103,255,0.35)"
+                            : "1px solid rgba(255,255,255,0.07)",
+                        }}
+                      >
+                        {/* Address row */}
+                        <div className="flex items-center justify-between mb-1.5">
+                          <code className="text-[11px] font-mono text-white/80 truncate max-w-[240px]">
+                            {record.address}
+                          </code>
+                          <div className="flex items-center gap-1.5 flex-shrink-0 ml-2">
+                            {isActive && (
+                              <span
+                                className="text-[9px] font-bold px-1.5 py-0.5 rounded"
+                                style={{ background: "rgba(92,103,255,0.2)", color: "#7C83EB" }}
+                              >
+                                ACTIVE
+                              </span>
+                            )}
+                            {isSelected && (
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#5C67FF" strokeWidth="2.5">
+                                <path d="M20 6L9 17l-5-5" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* userId */}
+                        <p className="text-[10px] text-white/25 mb-2">
+                          {record.userId ? `userId: ${record.userId}` : "userId: (from .env)"}
+                        </p>
+
+                        {/* Balances */}
+                        {!(record.address in historyBalances) ? (
+                          <p className="text-[11px] text-white/25">Loading balances…</p>
+                        ) : wBals.length === 0 ? (
+                          <p className="text-[11px] text-white/25">No balances</p>
+                        ) : (
+                          <div className="flex flex-wrap gap-2">
+                            {wBals.map((b, i) => (
+                              <span
+                                key={i}
+                                className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-0.5 rounded-full"
+                                style={{
+                                  background: b.chainId === 42161
+                                    ? "rgba(251,146,60,0.12)"
+                                    : "rgba(96,165,250,0.12)",
+                                  color: b.chainId === 42161 ? "#fb923c" : "#60a5fa",
+                                  border: b.chainId === 42161
+                                    ? "1px solid rgba(251,146,60,0.2)"
+                                    : "1px solid rgba(96,165,250,0.2)",
+                                }}
+                              >
+                                <span className={`w-1 h-1 rounded-full ${b.chainId === 42161 ? "bg-orange-400" : "bg-blue-400"}`} />
+                                {Number(b.amount).toFixed(4)} {b.symbol} · {b.chainName}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* ── Destination input ── */}
               <div className="mb-3">
                 <label className="text-[10px] text-white/40 uppercase tracking-wide font-medium block mb-1.5">
                   Destination address
@@ -697,7 +929,7 @@ export default function Home() {
                   onChange={(e) => setWithdrawDest(e.target.value.trim())}
                   placeholder="0x..."
                   spellCheck={false}
-                  className="w-full rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-200 outline-none transition-all"
+                  className="w-full rounded px-3.5 py-2.5 text-xs font-mono text-white/80 outline-none transition-all"
                   style={{
                     background: "rgba(255,255,255,0.04)",
                     border: withdrawDest && !isValidDest
@@ -710,14 +942,14 @@ export default function Home() {
                 )}
               </div>
 
-              {/* What will be withdrawn */}
-              {hasAnyBalance && (
+              {/* ── Summary of what will be sent ── */}
+              {selectedHasBalance && (
                 <div
-                  className="rounded-xl px-3.5 py-2.5 mb-3 space-y-1"
+                  className="rounded px-3.5 py-2.5 mb-3 space-y-1"
                   style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.06)" }}
                 >
-                  <p className="text-[10px] text-white/40 uppercase tracking-wide font-medium mb-1.5">Will withdraw</p>
-                  {nonZeroBalances.map((b, i) => (
+                  <p className="text-[10px] text-white/40 uppercase tracking-wide font-medium mb-1.5">Will send</p>
+                  {selectedBalances.map((b, i) => (
                     <div key={i} className="flex items-center justify-between">
                       <div className="flex items-center gap-1.5">
                         <span className={`w-1.5 h-1.5 rounded-full ${b.chainId === 42161 ? "bg-orange-400" : "bg-blue-400"}`} />
@@ -728,37 +960,37 @@ export default function Home() {
                       </span>
                     </div>
                   ))}
-                  {nonZeroBalances.some(b => b.symbol === "ETH") && (
-                    <p className="text-[10px] text-white/25 mt-1">* 0.0002 ETH reserved per chain for gas</p>
+                  {selectedBalances.some((b) => b.symbol === "ETH") && (
+                    <p className="text-[10px] text-white/25 mt-1">* 0.0002 ETH reserved for gas</p>
                   )}
                 </div>
               )}
 
-              {/* Button */}
+              {/* ── Button ── */}
               <button
                 onClick={executeWithdraw}
-                disabled={withdrawing || !hasAnyBalance || !isValidDest}
+                disabled={!canWithdraw}
                 className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded text-sm font-semibold text-white transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{
                   background: withdrawing
                     ? "rgba(16,185,129,0.3)"
-                    : hasAnyBalance && isValidDest
+                    : canWithdraw
                     ? "linear-gradient(135deg, #059669 0%, #0d9488 100%)"
                     : "rgba(255,255,255,0.06)",
-                  boxShadow: !withdrawing && hasAnyBalance && isValidDest
-                    ? "0 0 20px rgba(16,185,129,0.2)"
-                    : "none",
+                  boxShadow: canWithdraw ? "0 0 20px rgba(16,185,129,0.2)" : "none",
                 }}
               >
                 {withdrawing && <Spinner size={13} />}
                 {withdrawing
                   ? "Withdrawing…"
-                  : !hasAnyBalance
+                  : !selectedWithdrawAddr
+                  ? "Select a wallet above"
+                  : !selectedHasBalance
                   ? "No balances to withdraw"
                   : "Withdraw All"}
               </button>
 
-              {/* Log */}
+              {/* ── Log ── */}
               {(withdrawLog.length > 0 || withdrawing) && (
                 <div className="mt-4">
                   <p className="text-[11px] text-white/40 uppercase tracking-wide font-medium mb-1.5">
@@ -766,7 +998,7 @@ export default function Home() {
                   </p>
                   <div
                     ref={withdrawLogRef}
-                    className="terminal rounded-xl p-3.5 h-36 overflow-y-auto space-y-1.5 text-[11px]"
+                    className="terminal rounded p-3.5 h-36 overflow-y-auto space-y-1.5 text-[11px]"
                   >
                     {withdrawLog.map((line, i) => <LogLine key={i} line={line} />)}
                     {withdrawing && (
@@ -778,22 +1010,18 @@ export default function Home() {
                 </div>
               )}
 
-              {/* Result */}
+              {/* ── Result ── */}
               {withdrawError && (
-                <div className="mt-3">
-                  <ErrorBanner message={withdrawError} />
-                </div>
+                <div className="mt-3"><ErrorBanner message={withdrawError} /></div>
               )}
               {withdrawResult && (
                 <div
-                  className="mt-3 rounded-xl px-4 py-3"
+                  className="mt-3 rounded px-4 py-3"
                   style={{
                     background: withdrawResult.status === "SUCCESS"
-                      ? "rgba(16,185,129,0.07)"
-                      : "rgba(245,158,11,0.07)",
+                      ? "rgba(16,185,129,0.07)" : "rgba(245,158,11,0.07)",
                     border: withdrawResult.status === "SUCCESS"
-                      ? "1px solid rgba(16,185,129,0.2)"
-                      : "1px solid rgba(245,158,11,0.2)",
+                      ? "1px solid rgba(16,185,129,0.2)" : "1px solid rgba(245,158,11,0.2)",
                   }}
                 >
                   {withdrawResult.status === "EMPTY" ? (
@@ -807,7 +1035,7 @@ export default function Home() {
                           href={tx.explorerUrl}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="flex items-center justify-between rounded-lg px-3 py-2 group transition-all"
+                          className="flex items-center justify-between rounded px-3 py-2 group transition-all"
                           style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.06)" }}
                         >
                           <div>
@@ -829,7 +1057,7 @@ export default function Home() {
               )}
             </div>
           </div>
-        </div>
+        </div>}
 
         {/* ── Section 4: Bridge ──────────────────────────────────────────── */}
         <div className="glass rounded-2xl p-5">

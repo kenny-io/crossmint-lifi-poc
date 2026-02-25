@@ -17,6 +17,7 @@ interface BridgeRequestBody {
   fromToken: string;
   toToken: string;
   amount: string; // in smallest unit (e.g. "1000000" for 1 USDC)
+  locator?: string; // optional wallet locator; falls back to .env default
 }
 
 function sseMessage(event: string, data: unknown): string {
@@ -40,7 +41,7 @@ export async function POST(request: NextRequest) {
           status: "PENDING",
           message: "Loading wallet...",
         });
-        const wallet = await getOrCreateWallet();
+        const wallet = await getOrCreateWallet(body.locator);
         const address = wallet.address;
 
         send("status", {

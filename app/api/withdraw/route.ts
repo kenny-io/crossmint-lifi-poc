@@ -18,7 +18,7 @@ function sseMessage(event: string, data: unknown): string {
 }
 
 export async function POST(request: NextRequest) {
-  const { destination } = await request.json();
+  const { destination, locator } = await request.json();
 
   if (!destination || !destination.startsWith("0x") || destination.length !== 42) {
     return Response.json({ error: "Invalid destination address" }, { status: 400 });
@@ -35,7 +35,8 @@ export async function POST(request: NextRequest) {
 
       try {
         send("status", { status: "PENDING", message: "Loading wallet..." });
-        const wallet = await getOrCreateWallet();
+        // locator may be undefined — getOrCreateWallet falls back to .env default
+        const wallet = await getOrCreateWallet(locator);
         const addr = wallet.address as `0x${string}`;
         send("status", { status: "DONE", message: `Wallet: ${addr}` });
 
